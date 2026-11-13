@@ -21,6 +21,11 @@ public enum TTSModelError: Error, LocalizedError, CustomStringConvertible {
 }
 
 public enum TTS {
+    static func shouldResolveNestedConfig(after error: Error) -> Bool {
+        guard let httpError = error as? HTTPClientError else { return false }
+        return httpError.code == .responseError && httpError.statusCode == 404
+    }
+
     private enum ModelSource {
         case repository(String, cache: HubCache)
         case localDirectory(URL, repoHint: String, cache: HubCache)
@@ -73,8 +78,7 @@ public enum TTS {
                 modelType = try await ModelUtils.resolveModelType(repoID: repoID, hfToken: hfToken, cache: cache)
             } catch {
                 // Some complete packages keep metadata beside their language model.
-                guard case let HTTPClientError.responseError(response, _) = error,
-                      response.statusCode == 404 else { throw error }
+                guard shouldResolveNestedConfig(after: error) else { throw error }
                 let client: HubClient
                 if let hfToken, !hfToken.isEmpty {
                     client = HubClient(host: HubClient.defaultHost, bearerToken: hfToken, cache: cache)
