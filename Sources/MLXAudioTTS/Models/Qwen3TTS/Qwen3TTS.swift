@@ -1136,6 +1136,48 @@ public final class Qwen3TTSModel: Module, SpeechGenerationModel, @unchecked Send
         return try await fromModelDirectory(modelDir)
     }
 
+    /// Loads only the supplied prepared bytes. Admission and authenticity belong to the caller.
+    public static func fromPreparedData(_ files: [String: Data]) throws -> Qwen3TTSModel {
+        try Qwen3TTSPreparedInput.withPreparedInput(files) { input in
+            let config = input.config
+            let model = Qwen3TTSModel(config: config)
+            model.tokenizer = input.tokenizer
+
+            let allWeights = try MLX.loadArrays(data: input.modelWeights)
+            let talkerWeights = Qwen3TTSTalkerForConditionalGeneration.sanitize(weights: allWeights)
+            let talkerPairs = talkerWeights.map { ($0.key, $0.value) }
+
+            if config.quantization != nil || config.perLayerQuantization != nil {
+                quantize(model: model.talker) { path, _ in
+                    guard talkerWeights["\(path).scales"] != nil else {
+                        return nil
+                    }
+
+                    if let perLayerQuant = config.perLayerQuantization,
+                       let layerQuant = perLayerQuant.quantization(layer: path) {
+                        return layerQuant.asTuple
+                    }
+
+                    return config.quantization?.asTuple
+                }
+            }
+
+            try model.talker.update(parameters: ModuleParameters.unflattened(talkerPairs), verify: .all)
+            eval(model.talker.parameters())
+
+            let speechTokenizer = Qwen3TTSSpeechTokenizer(config: input.speechConfig)
+            let speechWeights = try MLX.loadArrays(data: input.speechWeights)
+            if !speechWeights.isEmpty {
+                let sanitized = Qwen3TTSSpeechTokenizer.sanitize(weights: speechWeights)
+                let pairs = sanitized.map { ($0.key, $0.value) }
+                try speechTokenizer.update(parameters: ModuleParameters.unflattened(pairs), verify: .all)
+                eval(speechTokenizer.parameters())
+            }
+            model.speechTokenizer = speechTokenizer
+            return model
+        }
+    }
+
     public static func fromModelDirectory(_ modelDir: URL) async throws -> Qwen3TTSModel {
         // Load main config
         let configData = try Data(contentsOf: modelDir.appendingPathComponent("config.json"))
